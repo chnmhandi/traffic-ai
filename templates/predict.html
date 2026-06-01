@@ -3,7 +3,65 @@
 {% block content %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+<style>
+    /* Glowing markers for nearest hospital */
+    @keyframes marker-pulse-red {
+        0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.85); transform: scale(1); }
+        70% { box-shadow: 0 0 0 14px rgba(239, 68, 68, 0); transform: scale(1.06); }
+        100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); transform: scale(1); }
+    }
+    @keyframes marker-pulse-blue {
+        0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.85); transform: scale(1); }
+        70% { box-shadow: 0 0 0 14px rgba(59, 130, 246, 0); transform: scale(1.06); }
+        100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); transform: scale(1); }
+    }
+    .nearest-glow-red {
+        animation: marker-pulse-red 1.6s infinite ease-in-out;
+        border-radius: 50%;
+    }
+    .nearest-glow-blue {
+        animation: marker-pulse-blue 1.6s infinite ease-in-out;
+        border-radius: 50%;
+    }
+    /* Map Legend styling */
+    .map-legend {
+        background: rgba(255, 255, 255, 0.95);
+        border: 1px solid rgba(0, 0, 0, 0.15);
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 0.85rem;
+        font-family: 'Inter', sans-serif;
+        color: #1f2937;
+        line-height: 1.6;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        backdrop-filter: blur(8px);
+    }
+    .dark-mode .map-legend {
+        background: rgba(30, 30, 40, 0.95);
+        border-color: rgba(255,255,255,0.15);
+        color: #f3f4f6;
+    }
+    .map-legend div {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 500;
+    }
+    /* Google Maps styled popup Emergency card */
+    .hospital-popup-card button.popup-view-route-btn {
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .hospital-popup-card button.popup-view-route-btn:hover {
+        opacity: 0.9;
+        transform: translateY(-0.5px);
+    }
+    .leaflet-popup-content-wrapper {
+        border-radius: 12px !important;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.2) !important;
+        padding: 4px !important;
+    }
+</style>
 
 <div class="predict-container glass-card">
     <div class="predict-header">
@@ -28,12 +86,22 @@
 
                 <!-- Vehicle Speed -->
                 <div class="input-group">
-                    <label for="vehicle_speed">Vehicle Speed (mph)</label>
-                    <div style="display: flex; gap: 10px;">
+                    <label for="vehicle_speed">Vehicle Speed (km/h)</label>
+                    <div style="position: relative; display: flex; align-items: center;">
                         <input type="number" step="0.1" id="vehicle_speed" name="Vehicle_Speed"
-                               min="0" max="250" placeholder="e.g. 65" class="glass-input" style="flex: 1;" required>
-                        <button type="button" id="btn-speedometer" class="btn btn-secondary" style="white-space: nowrap; padding: 0.5rem 1rem; width:110px;" title="Track speed via device GPS">⏱️ Live</button>
+                               min="0" max="250" placeholder="e.g. 65" class="glass-input" required 
+                               style="width: 100%; padding-right: 135px; margin-top: 0; box-sizing: border-box;">
+                        
+                        <button type="button" id="start-tracking-btn" class="btn btn-secondary" 
+                                style="position: absolute; right: 6px; top: 50%; transform: translateY(-50%); padding: 4px 12px; font-size: 0.75rem; border-radius: 50px; background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #10b981; white-space: nowrap; margin: 0; box-shadow: none; cursor: pointer; transition: all 0.2s;">
+                            🚗 Start Tracking
+                        </button>
+                        <button type="button" id="stop-tracking-btn" class="btn btn-secondary" 
+                                style="display: none; position: absolute; right: 6px; top: 50%; transform: translateY(-50%); padding: 4px 12px; font-size: 0.75rem; border-radius: 50px; background-color: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; white-space: nowrap; margin: 0; box-shadow: none; cursor: pointer; transition: all 0.2s;">
+                            ⛔ Stop
+                        </button>
                     </div>
+                    <div id="speed-tracking-status" style="font-size: 0.8rem; margin-top: 6px; display: none;"></div>
                 </div>
 
                 <!-- Speed Limit (Hidden, Automatically Synced) -->
@@ -111,7 +179,7 @@
                             <span id="ui-temp">--</span>°C | <span id="ui-hum">--</span>% Hum
                         </div>
                         <div style="font-size: 0.75rem; color: #10b981; font-weight: 600; background: rgba(16,185,129,0.1); padding: 2px 6px; border-radius: 4px; display: inline-block;">
-                            Max Speed: <span id="ui-speed-limit">40 mph (Default)</span>
+                            Max Speed: <span id="ui-speed-limit">40 km/h (Default)</span>
                         </div>
                     </div>
                 </div>
@@ -137,17 +205,21 @@
             <p id="severity-desc" style="margin-top:1rem; line-height:1.6; color: var(--text-muted);">
                 Awaiting input...
             </p>
+            <div id="severity-warning-box" style="display: none; padding: 15px; margin-top: 15px; border-radius: 8px; text-align: left;">
+                <div style="font-weight: bold; font-size: 1.1rem; margin-bottom: 5px;" id="warning-title"></div>
+                <div id="warning-text" style="font-size: 0.95rem;"></div>
+                <button id="stop-sound-btn" type="button" class="btn" style="display: none; padding: 6px 12px; font-size: 0.8rem; margin-top: 10px; background-color: rgba(255,255,255,0.25); border: 1px solid rgba(255,255,255,0.5); color: white; cursor: pointer; border-radius: 4px;">🔇 Stop Sound</button>
+            </div>
             <div id="extra-results" style="margin-top: 15px; grid-gap: 10px; display: flex; flex-direction: column; text-align: left; background: rgba(0,0,0,0.05); padding: 15px; border-radius: 8px;">
                 <div><strong>Driver Risk Score:</strong> <span id="res-score" style="font-weight: bold; color: #ec4899;"></span>/100</div>
                 <div><strong>Emergency Action:</strong> <span id="res-emergency"></span></div>
                 <div><strong>AI Explanation:</strong> <span id="res-ai"></span></div>
                 <div id="hospital-box" style="display: none; margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(0,0,0,0.1);">
-                    <strong>🏥 Fastest Route:</strong> <span id="res-hospital" style="color: #10b981; font-weight: 600;">Searching...</span>
+                    <strong>🏥 Suggested Nearest Hospital:</strong> <span id="res-hospital" style="color: #10b981; font-weight: 600;">Searching...</span>
                     <!-- Dedicated Route Map inside Results Box -->
                     <div id="hospital-map" style="height: 250px; width: 100%; border-radius: 8px; margin-top: 12px; border: 1px solid rgba(0,0,0,0.1); display: none;"></div>
                 </div>
             </div>
-            <button type="button" class="btn btn-secondary" id="btn-pdf" style="margin-top: 15px; width: 100%;">📄 Download PDF Report</button>
         </div>
     </div>
 </div>
@@ -172,43 +244,140 @@
 
 {% block scripts %}
 <script>
-let audioCtx;
-let alarmPlaying = false;
-let alarmInterval = null;
-
-function playAlarm() {
-    if (alarmPlaying) return;
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    
-    alarmInterval = setInterval(() => {
-        if (!alarmPlaying) return;
-        let osc = audioCtx.createOscillator();
-        let g = audioCtx.createGain();
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(800, audioCtx.currentTime); 
-        osc.frequency.setValueAtTime(1200, audioCtx.currentTime + 0.2); 
-        g.gain.setValueAtTime(0.5, audioCtx.currentTime);
-        g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
-        osc.connect(g);
-        g.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(audioCtx.currentTime + 0.4);
-    }, 500);
-
-    alarmPlaying = true;
-}
-
-function stopAlarm() {
-    alarmPlaying = false;
-    if (alarmInterval) clearInterval(alarmInterval);
-    alarmInterval = null;
-}
-
 document.addEventListener('DOMContentLoaded', () => {
     
+    let audioCtx;
+    let oscillator;
+    let gainNode;
+    let sirenInterval;
+    let sirenTimeout;
+
+    function stopSiren() {
+        if (sirenInterval) clearInterval(sirenInterval);
+        if (sirenTimeout) clearTimeout(sirenTimeout);
+        if (oscillator) {
+            try { oscillator.stop(); } catch(e){}
+            try { oscillator.disconnect(); } catch(e){}
+            oscillator = null;
+        }
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+        }
+        document.getElementById('stop-sound-btn').style.display = 'none';
+    }
+
+    function speakWarning(text, delayMs) {
+        setTimeout(() => {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                const utterance = new SpeechSynthesisUtterance(text);
+                
+                // Ensure voices are loaded
+                let voices = window.speechSynthesis.getVoices();
+                let femaleVoice = voices.find(v => 
+                    v.name.toLowerCase().includes('female') || 
+                    v.name.toLowerCase().includes('woman') || 
+                    v.name.toLowerCase().includes('zira') || 
+                    v.name.toLowerCase().includes('samantha') ||
+                    v.name.toLowerCase().includes('victoria')
+                );
+                
+                if (femaleVoice) {
+                    utterance.voice = femaleVoice;
+                }
+                
+                window.speechSynthesis.speak(utterance);
+            }
+        }, delayMs);
+    }
+
+    document.getElementById('stop-sound-btn').addEventListener('click', stopSiren);
+
+    function playSiren(severity) {
+        stopSiren();
+        if (severity < 2) return;
+        
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+        
+        oscillator = audioCtx.createOscillator();
+        gainNode = audioCtx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        
+        if (severity === 2) {
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 0.5);
+        } else if (severity >= 3) {
+            document.getElementById('stop-sound-btn').style.display = 'inline-block';
+            oscillator.type = 'square';
+            oscillator.frequency.setValueAtTime(400, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.15, audioCtx.currentTime);
+            
+            let isHigh = false;
+            sirenInterval = setInterval(() => {
+                if(oscillator) {
+                    oscillator.frequency.setValueAtTime(isHigh ? 400 : 600, audioCtx.currentTime);
+                    isHigh = !isHigh;
+                }
+            }, 300);
+            
+            oscillator.start();
+            sirenTimeout = setTimeout(() => {
+                stopSiren();
+            }, 5000);
+        }
+    }
+
     let hospMapInstance = null;
     let hospMapMarkers = [];
+    let hospMapLines = [];
+    let mainMapHospitalMarkers = [];
+    let mainMapHospitalLines = [];
+
+    const LegendControl = L.Control.extend({
+        options: { position: 'bottomright' },
+        onAdd: function (map) {
+            const container = L.DomUtil.create('div', 'map-legend');
+            container.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <span style="font-size: 1.15rem; color: #3b82f6; display: inline-block; vertical-align: middle;">🔵</span> 
+                    <span style="font-size: 0.8rem; font-weight: 600;">Government Hospital</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <span style="font-size: 1.15rem; color: #ef4444; display: inline-block; vertical-align: middle;">🔴</span> 
+                    <span style="font-size: 0.8rem; font-weight: 600;">Private Hospital</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 1.15rem; display: inline-block; vertical-align: middle;">📍</span> 
+                    <span style="font-size: 0.8rem; font-weight: 600;">Your Location</span>
+                </div>
+            `;
+            return container;
+        }
+    });
+
+    window.focusHospitalRoute = function(hLat, hLon) {
+        const accidentLat = parseFloat(document.getElementById('lat').value);
+        const accidentLon = parseFloat(document.getElementById('lon').value);
+        if (!isNaN(accidentLat) && !isNaN(accidentLon)) {
+            const bounds = L.latLngBounds([[accidentLat, accidentLon], [hLat, hLon]]);
+            if (map) {
+                map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+            }
+            if (hospMapInstance) {
+                hospMapInstance.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+            }
+        }
+    };
 
     const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '© OpenStreetMap' });
     const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 18, attribution: 'Tiles © Esri' });
@@ -229,21 +398,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let userMarker;
     let hospMarker;
     
-    // Custom Hospital Pin
-    const hospIcon = L.divIcon({
-        className: 'custom-hosp-pin',
-        html: '<div style="background-color: #ef4444; color: white; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; border: 2px solid white; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">🏥</div>',
-        iconSize: [30, 30],
-        iconAnchor: [15, 15]
-    });
-    
-    // Custom Gov Hospital Pin
-    const govIcon = L.divIcon({
-        className: 'custom-gov-pin',
-        html: '<div style="background-color: #3b82f6; color: white; border-radius: 50%; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; border: 2px solid white; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">🏛️</div>',
-        iconSize: [30, 30],
-        iconAnchor: [15, 15]
-    });
+    // Add Legend Control on Page Load to Main Map
+    new LegendControl().addTo(map);
 
     fetch('/api/hotspots').then(r => r.json()).then(data => {
         data.forEach(pt => {
@@ -320,7 +476,7 @@ document.addEventListener('DOMContentLoaded', () => {
             
             document.getElementById('speed_limit').value = limitVal;
             if (document.getElementById('ui-speed-limit')) {
-                document.getElementById('ui-speed-limit').textContent = limitVal + " mph (" + limitSrc + ")";
+                document.getElementById('ui-speed-limit').textContent = limitVal + " km/h (" + limitSrc + ")";
             }
             // Set Infrastructure & T-Junction Checkbox
             document.getElementById('chk_crossing').checked = lData.infra.includes("Crossing");
@@ -339,42 +495,65 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const wRes = await fetch(`/api/weather?lat=${lat}&lon=${lon}`);
             const wData = await wRes.json();
+            console.log("Weather response:", wData);
             
-            let weatherMain = wData.main || "Clear";
-            let hum         = wData.humidity || 60;
-            let temp        = wData.temp || 20;
-            
-            // Update Form Data
-            if(['Clear', 'Clouds'].includes(weatherMain)) document.getElementById('weather').value = 'Clear';
-            else if(['Rain', 'Drizzle'].includes(weatherMain)) document.getElementById('weather').value = 'Rainy';
-            else document.getElementById('weather').value = 'Storm';
-            
-            document.getElementById('temperature').value = temp;
-            document.getElementById('humidity').value = hum;
-            
-            // Set Road Condition based on Weather
-            let autoRoadCond = "Dry";
-            if (['Rain', 'Drizzle', 'Storm', 'Thunderstorm', 'Snow'].includes(weatherMain)) autoRoadCond = "Wet";
-            document.getElementById('road_condition').value = autoRoadCond;
-            document.getElementById('ui-road-cond').textContent = autoRoadCond;
-            
-            // Update UI Widget
             const uiWidget = document.getElementById('live-context-widget');
-            if (uiWidget) {
-                uiWidget.style.display = 'flex';
-                document.getElementById('ui-weather-desc').textContent = weatherMain + " Conditions";
-                document.getElementById('ui-temp').textContent = Math.round(temp);
-                document.getElementById('ui-hum').textContent = Math.round(hum);
+            
+            if (wData.success === true) {
+                let weatherMain = wData.main || "Clear";
+                let hum         = wData.humidity || 60;
+                let temp        = wData.temp || 20;
+                let visAPI      = wData.visibility || 65;
                 
-                let icon = '🌤';
-                if (weatherMain === 'Rain' || weatherMain === 'Drizzle') icon = '🌧';
-                if (weatherMain === 'Storm' || weatherMain === 'Thunderstorm') icon = '⛈';
-                if (weatherMain === 'Snow') icon = '❄️';
-                if (weatherMain === 'Clear') icon = '☀️';
-                document.getElementById('ui-weather-icon').textContent = icon;
+                // Correctly map weather to exact dataset categories
+                let mappedWeather = 'Clear';
+                if (['Clear', 'Clouds'].includes(weatherMain)) mappedWeather = 'Clear';
+                else if (['Mist', 'Fog', 'Foggy', 'Haze', 'Smoke'].includes(weatherMain)) mappedWeather = 'Foggy';
+                else if (['Rain', 'Rainy', 'Drizzle', 'Showers'].includes(weatherMain)) mappedWeather = 'Rainy';
+                else if (['Thunderstorm', 'Storm'].includes(weatherMain)) mappedWeather = 'Storm';
+                else if (['Snow'].includes(weatherMain)) mappedWeather = 'Snow';
+                else mappedWeather = weatherMain;
+                
+                document.getElementById('weather').value = mappedWeather;
+                document.getElementById('temperature').value = temp;
+                document.getElementById('humidity').value = hum;
+                
+                // Update visibility select field
+                if (visAPI < 40) document.getElementById('visibility').value = "25";
+                else if (visAPI > 80) document.getElementById('visibility').value = "95";
+                else document.getElementById('visibility').value = "65";
+                
+                // Set Road Condition based on exactly mapped Weather
+                let autoRoadCond = "Dry";
+                if (['Rainy', 'Storm', 'Snow'].includes(mappedWeather)) autoRoadCond = "Wet";
+                document.getElementById('road_condition').value = autoRoadCond;
+                document.getElementById('ui-road-cond').textContent = autoRoadCond;
+                
+                // Update UI Widget
+                if (uiWidget) {
+                    uiWidget.style.display = 'flex';
+                    document.getElementById('ui-weather-desc').textContent = mappedWeather + " Conditions";
+                    document.getElementById('ui-temp').textContent = Math.round(temp);
+                    document.getElementById('ui-hum').textContent = Math.round(hum);
+                    
+                    let icon = '☀️';
+                    if (mappedWeather === 'Rainy') icon = '🌧️';
+                    if (mappedWeather === 'Storm') icon = '⛈️';
+                    if (mappedWeather === 'Snow') icon = '❄️';
+                    if (mappedWeather === 'Foggy') icon = '🌫️';
+                    document.getElementById('ui-weather-icon').textContent = icon;
+                }
+            } else {
+                if (uiWidget) {
+                    uiWidget.style.display = 'flex';
+                    document.getElementById('ui-weather-desc').textContent = "Weather API failed. Check API key.";
+                    document.getElementById('ui-temp').textContent = "--";
+                    document.getElementById('ui-hum').textContent = "--";
+                    document.getElementById('ui-weather-icon').textContent = "⚠️";
+                }
             }
         } catch(e) { 
-            alert("Location acquired. (Weather API missing key or failed).");
+            console.error("Weather API Exception:", e);
         }
     }
 
@@ -398,79 +577,61 @@ document.addEventListener('DOMContentLoaded', () => {
         await executeGeoSync(e.latlng.lat, e.latlng.lng);
     });
 
-    let watchId = null;
-    let isLiveSpeed = false;
-    let lastAutoPredict = 0;
-    const btnSpeedo = document.getElementById('btn-speedometer');
-    const speedInput = document.getElementById('vehicle_speed');
+    const startTrackingBtn = document.getElementById('start-tracking-btn');
+    const stopTrackingBtn = document.getElementById('stop-tracking-btn');
+    const trackingStatus = document.getElementById('speed-tracking-status');
+    let speedWatchId = null;
 
-    btnSpeedo.addEventListener('click', () => {
-        isLiveSpeed = !isLiveSpeed;
-        if (isLiveSpeed) {
-            btnSpeedo.style.backgroundColor = '#ef4444'; 
-            btnSpeedo.style.color = '#fff';
-            btnSpeedo.textContent = '🛑 Stop';
-            
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            if (audioCtx.state === 'suspended') audioCtx.resume();
-
-            if (navigator.geolocation) {
-                watchId = navigator.geolocation.watchPosition((pos) => {
-                    let speedMps = pos.coords.speed;
-                    if (speedMps === null || speedMps === undefined) speedMps = 0;
-                    let speedMph = speedMps * 2.23694;
-                    
-                    if (speedMps === 0 && window.MOCK_SPEED) speedMph = window.MOCK_SPEED;
-                    speedInput.value = speedMph.toFixed(1);
-                    
-                    const now = Date.now();
-                    const sBtn = document.getElementById('submit-btn');
-                    if (now - lastAutoPredict > 4000 && !sBtn.disabled) {
-                        lastAutoPredict = now;
-                        if (!document.getElementById('lat').value) {
-                            executeGeoSync(pos.coords.latitude, pos.coords.longitude).then(() => sBtn.click());
-                        } else {
-                            sBtn.click();
-                        }
-                    }
-                }, (err) => {
-                    alert("Speedometer error: " + err.message);
-                    btnSpeedo.click();
-                }, { enableHighAccuracy: true });
-            } else {
-                alert('Geolocation not supported!');
-                btnSpeedo.click();
-            }
-        } else {
-            btnSpeedo.style.backgroundColor = '';
-            btnSpeedo.style.color = '';
-            btnSpeedo.textContent = '⏱️ Live';
-            if (watchId !== null) {
-                navigator.geolocation.clearWatch(watchId);
-                watchId = null;
-            }
-            stopAlarm();
+    startTrackingBtn.addEventListener('click', () => {
+        if (!navigator.geolocation) {
+            alert('Geolocation is not supported by your browser.');
+            return;
         }
+
+        startTrackingBtn.style.display = 'none';
+        stopTrackingBtn.style.display = 'inline-block';
+        trackingStatus.style.display = 'none';
+        trackingStatus.textContent = '';
+
+        speedWatchId = navigator.geolocation.watchPosition(
+            (position) => {
+                if (position.coords.speed !== null) {
+                    trackingStatus.style.display = 'block';
+                    trackingStatus.style.color = '#10b981';
+                    trackingStatus.textContent = '🟢 Live GPS Tracking Active';
+                    
+                    let currentSpeed = position.coords.speed * 3.6; // m/s to km/h
+                    currentSpeed = Math.round(currentSpeed * 10) / 10;
+                    document.getElementById('vehicle_speed').value = currentSpeed;
+                } else {
+                    trackingStatus.style.display = 'block';
+                    trackingStatus.style.color = '#ef4444';
+                    trackingStatus.textContent = 'Speed not available. Move with GPS enabled.';
+                }
+            },
+            (error) => {
+                console.warn('Speed tracking error:', error);
+                trackingStatus.style.display = 'block';
+                trackingStatus.style.color = '#ef4444';
+                trackingStatus.textContent = 'Speed not available. Move with GPS enabled.';
+            },
+            {
+                enableHighAccuracy: true,
+                maximumAge: 0,
+                timeout: 5000
+            }
+        );
     });
 
-    const btnPdf = document.getElementById('btn-pdf');
-    if (btnPdf) {
-        btnPdf.addEventListener('click', () => {
-            btnPdf.style.display = 'none';
-            const element = document.getElementById('result-box');
-            // Scale canvas and allow cross-origin map renders
-            const opt = {
-                margin:       10,
-                filename:     `Accident_Risk_Report_${Date.now()}.pdf`,
-                image:        { type: 'jpeg', quality: 0.98 },
-                html2canvas:  { scale: 2, useCORS: true, letterRendering: true },
-                jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
-            };
-            html2pdf().set(opt).from(element).save().then(() => {
-                btnPdf.style.display = 'block';
-            });
-        });
-    }
+    stopTrackingBtn.addEventListener('click', () => {
+        if (speedWatchId !== null) {
+            navigator.geolocation.clearWatch(speedWatchId);
+            speedWatchId = null;
+        }
+        startTrackingBtn.style.display = 'inline-block';
+        stopTrackingBtn.style.display = 'none';
+        trackingStatus.style.display = 'none';
+    });
 
     const form       = document.getElementById('predict-form');
     const resultBox  = document.getElementById('result-box');
@@ -523,103 +684,237 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (data.error) {
                 alert('Error: ' + data.error);
-                stopAlarm();
             } else {
                 levelEl.textContent = `Level ${data.severity_level}`;
                 labelEl.textContent = data.label;
                 descEl.textContent  = data.explanation;
-                
-                if (isLiveSpeed && data.severity_level >= 2) {
-                    playAlarm();
-                } else {
-                    stopAlarm();
-                }
                 document.getElementById('res-score').textContent = data.driver_score;
                 document.getElementById('res-emergency').textContent = data.emergency_response;
                 document.getElementById('res-ai').textContent = data.ai_explanation;
                 badge.style.borderColor = data.color;
                 labelEl.style.color     = data.color;
                 
-                // OSM Backend Proxy Hospital Fetch logic (Now runs for ALL severities + 50km radius)
-                const hospBox = document.getElementById('hospital-box');
-                hospBox.style.display = 'block';
-                document.getElementById('res-hospital').textContent = "Scanning vicinity for hospitals (50km max radius)...";
-                document.getElementById('res-hospital').style.color = "#10b981";
+                const warningBox = document.getElementById('severity-warning-box');
+                const warningTitle = document.getElementById('warning-title');
+                const warningText = document.getElementById('warning-text');
                 
-                try {
-                    const gpsLat = parseFloat(document.getElementById('lat').value);
-                    const gpsLon = parseFloat(document.getElementById('lon').value);
-                    
-                    fetch(`/api/hospitals?lat=${gpsLat}&lon=${gpsLon}`)
-                    .then(r => r.json()).then(hData => {
-                        if (hData.nearest || hData.government) {
-                            let resultsHtml = "";
-                            const boundsArray = [ [gpsLat, gpsLon] ];
-                            
-                            // 🚀 Dedicated Results Map Logic Setup
-                            if(hospMarker) map.removeLayer(hospMarker);
-                            document.getElementById('hospital-map').style.display = 'block';
-                            if (!hospMapInstance) {
-                                hospMapInstance = L.map('hospital-map').setView([gpsLat, gpsLon], 13);
-                                L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '© CARTO' }).addTo(hospMapInstance);
-                            }
-                            hospMapMarkers.forEach(m => hospMapInstance.removeLayer(m));
-                            hospMapMarkers = [];
-                            
-                            const crashPin = L.marker([gpsLat, gpsLon]).addTo(hospMapInstance).bindPopup("⚠️ Crash Site");
-                            hospMapMarkers.push(crashPin);
-
-                            if (hData.nearest) {
-                                let n = hData.nearest;
-                                resultsHtml += `${n.name} (${n.distance}km, ${n.type})<br>`;
-                                boundsArray.push([n.lat, n.lon]);
-                                
-                                // Plot Nearest
-                                hospMarker = L.marker([n.lat, n.lon], {icon: hospIcon}).addTo(map).bindPopup(`<b>${n.name}</b><br>${n.distance}km (${n.type})`);
-                                const r1 = L.marker([n.lat, n.lon], {icon: hospIcon}).addTo(hospMapInstance).bindPopup(`<b>${n.name}</b><br>Nearest: ${n.distance}km`).openPopup();
-                                const line1 = L.polyline([ [gpsLat, gpsLon], [n.lat, n.lon] ], {color: '#ef4444', weight: 4, dashArray: '10, 10'}).addTo(hospMapInstance);
-                                hospMapMarkers.push(r1, line1);
-                            }
-                            
-                            if (hData.government && (!hData.nearest || hData.government.name !== hData.nearest.name)) {
-                                let g = hData.government;
-                                resultsHtml += `🏛️ Gov Facility: ${g.name} (${g.distance}km)<br>`;
-                                boundsArray.push([g.lat, g.lon]);
-                                
-                                // Plot Government
-                                const r2 = L.marker([g.lat, g.lon], {icon: govIcon}).addTo(hospMapInstance).bindPopup(`<b>${g.name}</b><br>Gov Facility: ${g.distance}km`);
-                                const line2 = L.polyline([ [gpsLat, gpsLon], [g.lat, g.lon] ], {color: '#3b82f6', weight: 4, dashArray: '10, 10'}).addTo(hospMapInstance);
-                                hospMapMarkers.push(r2, line2);
-                            }
-                            
-                            document.getElementById('res-hospital').innerHTML = "<br>" + resultsHtml;
-                            
-                            // Camera Framing logic
-                            if(userMarker && hospMarker) {
-                                const mainBounds = L.latLngBounds([userMarker.getLatLng(), hospMarker.getLatLng()]);
-                                map.fitBounds(mainBounds, {padding: [50, 50], animate: true, duration: 2});
-                            }
-                            
-                            const hBounds = L.latLngBounds(boundsArray);
-                            setTimeout(() => { 
-                                hospMapInstance.invalidateSize(); 
-                                hospMapInstance.fitBounds(hBounds, {padding: [30, 30]}); 
-                            }, 400);
-                            
-                        } else {
-                            document.getElementById('res-hospital').textContent = "No emergency center found within 50km.";
-                            document.getElementById('res-hospital').style.color = "#fbbf24";
-                            document.getElementById('hospital-map').style.display = 'none';
-                        }
-                    }).catch(e => {
-                        document.getElementById('res-hospital').textContent = "Hospital index unavailable.";
-                        document.getElementById('res-hospital').style.color = "#ef4444";
-                    });
-                    
-                } catch (gEr) {
-                    document.getElementById('res-hospital').textContent = "System Error: " + gEr.message;
-                    document.getElementById('res-hospital').style.color = "#ef4444";
+                let overspeedStr = "";
+                let vSpeed = parseFloat(payload['Vehicle_Speed']) || 0;
+                let sLimit = parseFloat(payload['Speed_Limit']) || 0;
+                if (vSpeed > sLimit && data.severity_level >= 2) {
+                    overspeedStr = "<br><br><strong>Overspeed detected. Please reduce your speed.</strong>";
                 }
+                
+                if (data.severity_level === 2) {
+                    warningBox.style.display = 'block';
+                    warningBox.style.backgroundColor = 'rgba(245, 158, 11, 0.9)'; // Orange
+                    warningBox.style.color = '#fff';
+                    warningTitle.innerHTML = '⚠️ Medium Risk Warning';
+                    warningText.innerHTML = 'Drive carefully. Reduce speed and stay alert to surrounding traffic conditions.' + overspeedStr;
+                    playSiren(2);
+                    if (overspeedStr !== "") {
+                        speakWarning("Overspeed detected. Please reduce your speed immediately.", 600);
+                    } else {
+                        speakWarning("Medium risk warning. Your speed and road conditions show medium risk. Reduce speed and drive carefully.", 600);
+                    }
+                } else if (data.severity_level >= 3) {
+                    warningBox.style.display = 'block';
+                    warningBox.style.backgroundColor = 'rgba(239, 68, 68, 0.9)'; // Red
+                    warningBox.style.color = '#fff';
+                    warningTitle.innerHTML = '🚨 High Risk Alert';
+                    warningText.innerHTML = 'Dangerous driving conditions detected. Reduce speed immediately and proceed with extreme caution.' + overspeedStr;
+                    playSiren(3);
+                    if (overspeedStr !== "") {
+                        speakWarning("Overspeed detected. Please reduce your speed immediately.", 0);
+                    } else {
+                        speakWarning("High risk alert. Dangerous driving condition condition detected. Reduce speed immediately and proceed with extreme caution.", 0);
+                    }
+                } else {
+                    warningBox.style.display = 'none';
+                    stopSiren();
+                }
+                
+                // OSM Backend Proxy Hospital Fetch logic
+                const hospBox = document.getElementById('hospital-box');
+                
+                if (data.severity_level <= 1) {
+                    hospBox.style.display = 'none';
+                } else {
+                    hospBox.style.display = 'block';
+                    document.getElementById('res-hospital').textContent = "Scanning vicinity for hospitals (50km max radius)...";
+                    document.getElementById('res-hospital').style.color = "#10b981";
+                    
+                    try {
+                        const gpsLat = parseFloat(document.getElementById('lat').value);
+                        const gpsLon = parseFloat(document.getElementById('lon').value);
+                        
+                        fetch(`/api/hospitals?lat=${gpsLat}&lon=${gpsLon}`)
+                        .then(r => r.json()).then(hData => {
+                            if (hData.nearest || hData.government) {
+                                let resultsHtml = "";
+                                const boundsArray = [ [gpsLat, gpsLon] ];
+                                
+                                // Clean up old hospital markers/lines from BOTH maps
+                                mainMapHospitalMarkers.forEach(m => map.removeLayer(m));
+                                mainMapHospitalMarkers = [];
+                                mainMapHospitalLines.forEach(l => map.removeLayer(l));
+                                mainMapHospitalLines = [];
+
+                                document.getElementById('hospital-map').style.display = 'block';
+                                if (!hospMapInstance) {
+                                    hospMapInstance = L.map('hospital-map').setView([gpsLat, gpsLon], 13);
+                                    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { attribution: '© CARTO' }).addTo(hospMapInstance);
+                                    // Add Map Legend to Results Map once it is initialized
+                                    new LegendControl().addTo(hospMapInstance);
+                                }
+                                hospMapMarkers.forEach(m => hospMapInstance.removeLayer(m));
+                                hospMapMarkers = [];
+                                hospMapLines.forEach(l => hospMapInstance.removeLayer(l));
+                                hospMapLines = [];
+                                
+                                const crashPin = L.marker([gpsLat, gpsLon]).addTo(hospMapInstance).bindPopup("⚠️ Crash Site");
+                                hospMapMarkers.push(crashPin);
+
+                                if (data.severity_level >= 2) {
+                                    let p = hData.private;
+                                    let g = hData.government;
+                                    
+                                    let isPrivateNearest = false;
+                                    if (p && g) {
+                                        isPrivateNearest = p.distance < g.distance;
+                                    } else if (p) {
+                                        isPrivateNearest = true;
+                                    } else {
+                                        isPrivateNearest = false;
+                                    }
+
+                                    const pGlowClass = (p && isPrivateNearest) ? 'nearest-glow-red' : '';
+                                    const gGlowClass = (g && !isPrivateNearest) ? 'nearest-glow-blue' : '';
+
+                                    // Government: Blue. Private: Red.
+                                    const privateIcon = L.divIcon({
+                                        className: 'custom-hosp-pin-private',
+                                        html: `<div class="${pGlowClass}" style="background-color: #ef4444; color: white; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 18px; border: 2.5px solid white; box-shadow: 0 4px 10px rgba(239, 68, 68, 0.45); transition: transform 0.2s;">🏥</div>`,
+                                        iconSize: [34, 34],
+                                        iconAnchor: [17, 17]
+                                    });
+
+                                    const governmentIcon = L.divIcon({
+                                        className: 'custom-hosp-pin-gov',
+                                        html: `<div class="${gGlowClass}" style="background-color: #3b82f6; color: white; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 18px; border: 2.5px solid white; box-shadow: 0 4px 10px rgba(59, 130, 246, 0.45); transition: transform 0.2s;">🏥</div>`,
+                                        iconSize: [34, 34],
+                                        iconAnchor: [17, 17]
+                                    });
+                                    
+                                    let pLink = p ? `https://www.google.com/maps/dir/?api=1&origin=${gpsLat},${gpsLon}&destination=${p.lat},${p.lon}` : "#";
+                                    let gLink = g ? `https://www.google.com/maps/dir/?api=1&origin=${gpsLat},${gpsLon}&destination=${g.lat},${g.lon}` : "#";
+                                    
+                                    let pText = p ? `<a href="${pLink}" target="_blank" style="color:#ef4444; text-decoration:underline; font-weight:600;">${p.name} - ${p.distance}km ↗</a>` : "Not found within 100km";
+                                    let gText = g ? `<a href="${gLink}" target="_blank" style="color:#3b82f6; text-decoration:underline; font-weight:600;">${g.name} - ${g.distance}km ↗</a>` : "Not found within 100km";
+                                    
+                                    resultsHtml = `<strong>Private:</strong> ${pText}<br><strong>Government:</strong> ${gText}`;
+                                    
+                                    let pmResult = null;
+                                    let gmResult = null;
+
+                                    // Plot Private Hospital
+                                    if (p) {
+                                        boundsArray.push([p.lat, p.lon]);
+                                        const pEstTime = Math.round(p.distance * 1.5);
+                                        const pPopupHtml = `
+                                            <div class="hospital-popup-card" style="font-family: 'Inter', sans-serif; min-width: 180px; padding: 4px;">
+                                                <div style="font-size: 1.05rem; font-weight: 700; color: #7f1d1d; margin-bottom: 2px; display: flex; align-items: center; gap: 4px;">🏥 ${p.name}</div>
+                                                <div style="font-size: 0.8rem; font-weight: 600; color: #ef4444; text-transform: uppercase; margin-bottom: 6px;">Private Hospital</div>
+                                                <div style="font-size: 0.85rem; margin-bottom: 2px; color: #374151;"><strong>Distance:</strong> ${p.distance} km</div>
+                                                <div style="font-size: 0.85rem; margin-bottom: 12px; color: #374151;"><strong>Estimated Time:</strong> ${pEstTime} min</div>
+                                                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                                    <button class="popup-view-route-btn" style="flex: 1; background: #ef4444; color: white; border: none; padding: 5px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: background 0.2s;" onclick="focusHospitalRoute(${p.lat}, ${p.lon})">View Route</button>
+                                                    <a href="${pLink}" target="_blank" style="flex: 1; text-align: center; background: #e5e7eb; color: #374151; border: none; padding: 5px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-decoration: none; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#d1d5db'" onmouseout="this.style.background='#e5e7eb'">Google Maps</a>
+                                                </div>
+                                            </div>
+                                        `;
+                                        
+                                        // Main Map Plot
+                                        const pmMain = L.marker([p.lat, p.lon], {icon: privateIcon}).addTo(map).bindPopup(pPopupHtml);
+                                        mainMapHospitalMarkers.push(pmMain);
+                                        const plMain = L.polyline([ [gpsLat, gpsLon], [p.lat, p.lon] ], {color: '#ef4444', weight: 4, dashArray: '8, 8', opacity: 0.85}).addTo(map).bindPopup(`<b>Route to Private: ${p.name}</b>`);
+                                        mainMapHospitalLines.push(plMain);
+
+                                        // Results Map Plot
+                                        pmResult = L.marker([p.lat, p.lon], {icon: privateIcon}).addTo(hospMapInstance).bindPopup(pPopupHtml);
+                                        hospMapMarkers.push(pmResult);
+                                        const plResult = L.polyline([ [gpsLat, gpsLon], [p.lat, p.lon] ], {color: '#ef4444', weight: 4, dashArray: '8, 8', opacity: 0.85}).addTo(hospMapInstance).bindPopup(`<b>Route to Private: ${p.name}</b>`);
+                                        hospMapLines.push(plResult);
+                                    }
+                                    
+                                    // Plot Government Hospital
+                                    if (g) {
+                                        boundsArray.push([g.lat, g.lon]);
+                                        const gEstTime = Math.round(g.distance * 1.5);
+                                        const gPopupHtml = `
+                                            <div class="hospital-popup-card" style="font-family: 'Inter', sans-serif; min-width: 180px; padding: 4px;">
+                                                <div style="font-size: 1.05rem; font-weight: 700; color: #1e3a8a; margin-bottom: 2px; display: flex; align-items: center; gap: 4px;">🏥 ${g.name}</div>
+                                                <div style="font-size: 0.8rem; font-weight: 600; color: #3b82f6; text-transform: uppercase; margin-bottom: 6px;">Government Hospital</div>
+                                                <div style="font-size: 0.85rem; margin-bottom: 2px; color: #374151;"><strong>Distance:</strong> ${g.distance} km</div>
+                                                <div style="font-size: 0.85rem; margin-bottom: 12px; color: #374151;"><strong>Estimated Time:</strong> ${gEstTime} min</div>
+                                                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                                    <button class="popup-view-route-btn" style="flex: 1; background: #3b82f6; color: white; border: none; padding: 5px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: background 0.2s;" onclick="focusHospitalRoute(${g.lat}, ${g.lon})">View Route</button>
+                                                    <a href="${gLink}" target="_blank" style="flex: 1; text-align: center; background: #e5e7eb; color: #374151; border: none; padding: 5px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-decoration: none; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#d1d5db'" onmouseout="this.style.background='#e5e7eb'">Google Maps</a>
+                                                </div>
+                                            </div>
+                                        `;
+                                        
+                                        // Main Map Plot
+                                        const gmMain = L.marker([g.lat, g.lon], {icon: governmentIcon}).addTo(map).bindPopup(gPopupHtml);
+                                        mainMapHospitalMarkers.push(gmMain);
+                                        const glMain = L.polyline([ [gpsLat, gpsLon], [g.lat, g.lon] ], {color: '#3b82f6', weight: 4, dashArray: '8, 8', opacity: 0.85}).addTo(map).bindPopup(`<b>Route to Government: ${g.name}</b>`);
+                                        mainMapHospitalLines.push(glMain);
+
+                                        // Results Map Plot
+                                        gmResult = L.marker([g.lat, g.lon], {icon: governmentIcon}).addTo(hospMapInstance).bindPopup(gPopupHtml);
+                                        hospMapMarkers.push(gmResult);
+                                        const glResult = L.polyline([ [gpsLat, gpsLon], [g.lat, g.lon] ], {color: '#3b82f6', weight: 4, dashArray: '8, 8', opacity: 0.85}).addTo(hospMapInstance).bindPopup(`<b>Route to Government: ${g.name}</b>`);
+                                        hospMapLines.push(glResult);
+                                    }
+
+                                    // Automatically open popup of nearest hospital
+                                    if (p && isPrivateNearest && pmResult) {
+                                        setTimeout(() => { pmResult.openPopup(); }, 600);
+                                    } else if (g && !isPrivateNearest && gmResult) {
+                                        setTimeout(() => { gmResult.openPopup(); }, 600);
+                                    }
+                                }
+                                
+                                if (data.severity_level === 2) {
+                                    document.getElementById('res-hospital').innerHTML = `Nearest hospital suggested for safety checkup.<br><span style="font-weight:normal;color:#333;margin-top:5px;display:inline-block;">${resultsHtml}</span>`;
+                                } else if (data.severity_level >= 3) {
+                                    document.getElementById('res-hospital').innerHTML = `Emergency hospital suggested based on high severity risk.<br><span style="font-weight:normal;color:#333;margin-top:5px;display:inline-block;">${resultsHtml}</span>`;
+                                }
+                                
+                                const hBounds = L.latLngBounds(boundsArray);
+                                setTimeout(() => { 
+                                    hospMapInstance.invalidateSize(); 
+                                    hospMapInstance.fitBounds(hBounds, {padding: [40, 40]}); 
+                                    map.fitBounds(hBounds, {padding: [40, 40]});
+                                }, 400);
+                            } else {
+                                document.getElementById('res-hospital').textContent = "No emergency center found within 50km.";
+                                document.getElementById('res-hospital').style.color = "#fbbf24";
+                                document.getElementById('hospital-map').style.display = 'none';
+                            }
+                        }).catch(e => {
+                            document.getElementById('res-hospital').textContent = "Hospital index unavailable.";
+                            document.getElementById('res-hospital').style.color = "#ef4444";
+                            document.getElementById('hospital-map').style.display = 'none';
+                        });
+                        
+                    } catch (gEr) {
+                        document.getElementById('res-hospital').textContent = "System Error: " + gEr.message;
+                        document.getElementById('res-hospital').style.color = "#ef4444";
+                        document.getElementById('hospital-map').style.display = 'none';
+                    }
+                }
+                
                 resultBox.classList.remove('hidden');
                 resultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }

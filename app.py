@@ -8,9 +8,14 @@ from sklearn.cluster import DBSCAN
 import numpy as np
 import requests
 import urllib.parse
+from dotenv import load_dotenv
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+
+load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = 'trafficai_secret_2026'
+app.secret_key = os.environ.get('SECRET_KEY', 'trafficai_secret_2026')
 
 MODEL_PATH    = 'model/model.pkl'
 FEATURES_PATH = 'model/features.pkl'
@@ -31,15 +36,26 @@ db = SQLAlchemy(app)
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(120), nullable=False)
+    password = db.Column(db.String(256), nullable=False)
     fullname = db.Column(db.String(120), nullable=False)
+    predictions = db.relationship('PredictionHistory', backref='user', lazy=True)
+
+class PredictionHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    speed = db.Column(db.Float, nullable=False)
+    limit = db.Column(db.Float, nullable=False)
+    weather = db.Column(db.String(50), nullable=False)
+    road_cond = db.Column(db.String(50), nullable=False)
+    severity_label = db.Column(db.String(50), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
 with app.app_context():
     db.create_all()
     # Create default accounts if empty
     if not User.query.first():
-        admin = User(username='admin', password='admin123', fullname='Administrator')
-        demo = User(username='user', password='user123', fullname='Demo User')
+        admin = User(username='admin', password=generate_password_hash('admin123'), fullname='Administrator')
+        demo = User(username='user', password=generate_password_hash('user123'), fullname='Demo User')
         db.session.add(admin)
         db.session.add(demo)
         db.session.commit()
@@ -104,9 +120,9 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '').strip()
 
-        user = User.query.filter_by(username=username, password=password).first()
+        user = User.query.filter_by(username=username).first()
 
-        if user:
+        if user and check_password_hash(user.password, password):
             session['username'] = user.username
             session['fullname'] = user.fullname
             return redirect(url_for('home'))
@@ -146,7 +162,8 @@ def register():
                 error = f'Username "{username}" is already taken. Please choose another.'
             else:
                 # Register the user
-                new_user = User(username=username, password=password, fullname=fullname)
+                hashed_pw = generate_password_hash(password)
+                new_user = User(username=username, password=hashed_pw, fullname=fullname)
                 db.session.add(new_user)
                 db.session.commit()
                 success = f'Account created successfully! Welcome, {fullname}. You can now sign in.'
@@ -168,7 +185,10 @@ def home():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    return render_template('dashboard.html')
+    model, features, encoders = load_ml_resources()
+    features_count = len(features) if features else 14
+    severity_classes = len(SEVERITY_MAP)
+    return render_template('dashboard.html', features_count=features_count, severity_classes=severity_classes)
 
 @app.route('/predict', methods=['GET'])
 @login_required
@@ -211,10 +231,12 @@ def api_location():
     try:
         geo_url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
         r_geo = requests.get(geo_url, timeout=5, headers={'User-Agent': 'TrafficAccidentAIv1'})
+        r_geo.raise_for_status()
         if r_geo.status_code == 200:
             geo_data = r_geo.json()
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print("Geocoding Error:", e)
+        return jsonify({"error": "Geocoding service unavailable"}), 503
 
     # 2. Overpass Infrastructure
     infra = []
@@ -255,27 +277,83 @@ def api_location():
 def api_weather():
     lat = request.args.get('lat')
     lon = request.args.get('lon')
-    api_key = '626d1cf5eb7a23ce015f1a2260033dcd'
-    fallback = {"main": "Clear", "temp": 20, "humidity": 60}
+    api_key = os.getenv('OPENWEATHER_API_KEY')
     
-    if not lat or not lon: return jsonify(fallback)
+    print(f"Weather API Key: {str(api_key)[:5]}*****" if api_key else "Weather API Key: None")
+    print(f"Latitude: {lat}")
+    print(f"Longitude: {lon}")
     
+    if not lat or not lon:
+        return jsonify({"success": False, "error": "Invalid coordinates"})
+    
+    ow_error = None
+    if not api_key:
+        ow_error = "OPENWEATHER_API_KEY missing"
+    else:
+        try:
+            url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+            r = requests.get(url, timeout=5)
+            
+            print(f"Weather Status: {r.status_code}")
+            print(f"Weather Response: {r.text}")
+            
+            if r.status_code == 200:
+                w_data = r.json()
+                vis = w_data.get('visibility', 6500) / 100
+                return jsonify({
+                    "success": True,
+                    "main": w_data['weather'][0]['main'],
+                    "description": w_data['weather'][0].get('description', ''),
+                    "temp": w_data['main']['temp'],
+                    "humidity": w_data['main']['humidity'],
+                    "visibility": min(max(vis, 10), 100)
+                })
+            elif r.status_code == 401:
+                ow_error = "Invalid OpenWeather API key"
+            elif r.status_code == 429:
+                ow_error = "API quota exceeded"
+            else:
+                ow_error = f"API returned {r.status_code}"
+        except Exception as e:
+            print("Network error (OpenWeather):", str(e))
+            ow_error = "Network error"
+            
+    # If OpenWeather failed, fallback to Open-Meteo
+    print("Falling back to Open-Meteo API...")
     try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            w_data = r.json()
-            vis = w_data.get('visibility', 10000) / 100
+        om_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,weather_code"
+        r_om = requests.get(om_url, timeout=5)
+        if r_om.status_code == 200:
+            om_data = r_om.json()
+            current = om_data.get("current", {})
+            temp = current.get("temperature_2m", 20)
+            hum = current.get("relative_humidity_2m", 60)
+            code = current.get("weather_code", 0)
+            
+            w_main = "Clear"
+            if code in [1, 2, 3]: w_main = "Clear"
+            elif code in [45, 48]: w_main = "Foggy"
+            elif code in [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82]: w_main = "Rainy"
+            elif code in [71, 73, 75, 77, 85, 86]: w_main = "Snow"
+            elif code in [95, 96, 99]: w_main = "Storm"
+            
             return jsonify({
-                "main": w_data['weather'][0]['main'],
-                "temp": w_data['main']['temp'],
-                "humidity": w_data['main']['humidity'],
-                "visibility": min(max(vis, 10), 100)
+                "success": True,
+                "main": w_main,
+                "weather": w_main,
+                "description": w_main,
+                "temp": temp,
+                "humidity": hum,
+                "visibility": 65
             })
     except Exception as e:
-        print("Weather API Error:", e)
-        
-    return jsonify(fallback)
+        print("Network error (Open-Meteo):", str(e))
+
+    # If both APIs failed, return the exact requested original OpenWeather error
+    return jsonify({
+        "success": False,
+        "error": ow_error
+    })
 
 def haversine(lat1, lon1, lat2, lon2):
     import math
@@ -296,62 +374,109 @@ def api_hospitals():
     try:
         lat_f = float(lat)
         lon_f = float(lon)
-        # 50km radius query checking Nodes, Ways, AND Relations (polygons)! Ultra-fast 'out center' limits data transfer.
-        hosp_query = f"""[out:json][timeout:15];nwr(around:50000,{lat_f},{lon_f})["amenity"="hospital"];out center;"""
-        url = "https://overpass-api.de/api/interpreter?data=" + urllib.parse.quote(hosp_query)
-        r = requests.get(url, timeout=15)
         
-        if r.status_code == 200:
-            h_data = r.json()
-            hospitals = []
+        def fetch_places(radius):
+            query = f"""
+            [out:json][timeout:15];
+            (
+              nwr["amenity"="hospital"](around:{radius},{lat_f},{lon_f});
+              nwr["amenity"="clinic"](around:{radius},{lat_f},{lon_f});
+              nwr["amenity"="doctors"](around:{radius},{lat_f},{lon_f});
+              nwr["healthcare"="hospital"](around:{radius},{lat_f},{lon_f});
+              nwr["healthcare"="clinic"](around:{radius},{lat_f},{lon_f});
+              nwr["healthcare"="centre"](around:{radius},{lat_f},{lon_f});
+              nwr["emergency"="ambulance_station"](around:{radius},{lat_f},{lon_f});
+              nwr["amenity"="pharmacy"](around:{radius},{lat_f},{lon_f});
+            );
+            out center;
+            """
+            url = "https://overpass-api.de/api/interpreter"
+            r = requests.post(url, data={"data": query.strip()}, headers={'User-Agent': 'TrafficAccidentApp/1.0'}, timeout=15)
+            if r.status_code == 200:
+                return r.json().get('elements', [])
+            else:
+                print(f"Overpass Error: {r.status_code} - {r.text}")
+            return []
+
+        elements = fetch_places(50000)
+        if not elements:
+            elements = fetch_places(100000)
             
-            for el in h_data.get('elements', []):
-                tags = el.get('tags', {})
-                name = tags.get('name', 'General Hospital')
-                
-                # 'out center' gives lat/lon direct for nodes, but inside a 'center' dict for ways/relations
-                h_lat = el.get('lat')
-                h_lon = el.get('lon')
-                if 'center' in el:
-                    h_lat = el['center'].get('lat')
-                    h_lon = el['center'].get('lon')
-                    
-                if not h_lat or not h_lon: continue
-                
-                # Calculate True Distance!
-                dist_km = haversine(lat_f, lon_f, h_lat, h_lon)
-                
-                # Determine Gov/Private
-                h_type = "Private"
-                name_low = name.lower()
-                op_type = tags.get('operator:type', '').lower()
-                op_name = tags.get('operator', '').lower()
-                
-                if op_type in ['public', 'government'] or 'gov' in name_low or 'public' in name_low or 'general' in name_low or 'civil' in name_low or 'district' in name_low or 'government' in op_name:
-                    h_type = "Government"
-                
-                hospitals.append({
-                    "name": name,
-                    "type": h_type,
-                    "lat": h_lat,
-                    "lon": h_lon,
-                    "distance": round(dist_km, 1)
-                })
+        hospitals = []
+        for el in elements:
+            tags = el.get('tags', {})
             
-            if not hospitals:
-                return jsonify(fallback)
+            med_type = "Hospital"
+            am = tags.get('amenity', '')
+            hc = tags.get('healthcare', '')
+            em = tags.get('emergency', '')
             
-            # Sort by distance
-            hospitals.sort(key=lambda x: x['distance'])
+            if am == 'clinic' or hc in ['clinic', 'centre']:
+                med_type = "Clinic"
+            elif am == 'pharmacy':
+                med_type = "Pharmacy"
+            elif am == 'doctors':
+                med_type = "Doctors"
+            elif em == 'ambulance_station':
+                med_type = "Ambulance Station"
+                
+            name = tags.get('name', 'Nearby Medical Center')
             
-            nearest_hosp = hospitals[0]
-            nearest_gov = next((h for h in hospitals if h['type'] == 'Government'), None)
+            h_lat = el.get('lat')
+            h_lon = el.get('lon')
+            if 'center' in el:
+                h_lat = el['center'].get('lat')
+                h_lon = el['center'].get('lon')
+                
+            if not h_lat or not h_lon: continue
             
-            return jsonify({
-                "nearest": nearest_hosp,
-                "government": nearest_gov
+            dist_km = haversine(lat_f, lon_f, h_lat, h_lon)
+            
+            h_type = "Private"
+            name_low = name.lower()
+            op_type = tags.get('operator:type', '').lower()
+            op_name = tags.get('operator', '').lower()
+            
+            gov_keywords = ['government', 'govt', 'gov', 'public', 'district', 'civil', 'general hospital', 'phc', 'chc', 'primary health centre', 'community health centre']
+            
+            is_gov = False
+            if op_type in ['public', 'government']:
+                is_gov = True
+            elif any(k in name_low for k in gov_keywords):
+                is_gov = True
+            elif any(k in op_name for k in gov_keywords):
+                is_gov = True
+                
+            if is_gov:
+                h_type = "Government"
+            
+            hospitals.append({
+                "name": name,
+                "type": h_type,
+                "med_type": med_type,
+                "lat": h_lat,
+                "lon": h_lon,
+                "distance": round(dist_km, 1)
             })
-            
+        
+        fallback = {"private": None, "government": None, "nearest": None}
+        if not hospitals:
+            return jsonify(fallback)
+        
+        hospitals.sort(key=lambda x: x['distance'])
+        
+        non_pharmacy = [h for h in hospitals if h['med_type'] != 'Pharmacy']
+        search_list = non_pharmacy if non_pharmacy else hospitals
+        
+        nearest_overall = search_list[0]
+        nearest_priv = next((h for h in search_list if h['type'] == 'Private'), None)
+        nearest_gov = next((h for h in search_list if h['type'] == 'Government'), None)
+
+        return jsonify({
+            "private": nearest_priv,
+            "government": nearest_gov,
+            "nearest": nearest_overall
+        })
     except Exception as e:
         print("Hospital API Error:", e)
 
@@ -411,7 +536,7 @@ def realtime_predict():
     final_explanation = ""
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+        client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
         
         sys_prompt = """You are an advanced AI assistant integrated into a Traffic Accident Risk Prediction System.
 Your role is to help users understand predictions, risks, and safety recommendations in simple and clear language.
@@ -439,6 +564,24 @@ HOW YOU SHOULD RESPOND: Keep answers short but meaningful. Always explain "WHY".
         if not exps_en: exps_en.append("Routine conditions detected; baseline risk model applied.")
         final_explanation = " ".join(exps_en) + "\n\n*(Note: Basic fallback explanation used due to network delay)*"
 
+    # Save Prediction History
+    try:
+        user = User.query.filter_by(username=session.get('username')).first()
+        if user:
+            new_pred = PredictionHistory(
+                user_id=user.id,
+                speed=speed,
+                limit=limit,
+                weather=weather,
+                road_cond=road_cond,
+                severity_label=info.get('label', 'Unknown')
+            )
+            db.session.add(new_pred)
+            db.session.commit()
+    except Exception as e:
+        print("Error saving prediction history:", e)
+        db.session.rollback()
+
     return jsonify({
         'severity_level': pred,
         'label': info.get('label', 'Unknown'),
@@ -460,7 +603,7 @@ def api_chat():
         
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+        client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
         
         sys_prompt = "You are a helpful, clear, and safety-focused AI Traffic Assistant for an Indian Traffic Severity Predictor system. Answer driving safety, app usage, and traffic-related questions quickly and easily without complex jargon. Do not provide medical or legal advice."
         
